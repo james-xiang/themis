@@ -266,7 +266,7 @@ int InitSDK() {
   {
        fprintf(stderr, "TS_DatabaseDownload failed. Abort!\n");
        //TS_HandleDestroy(&TsHandle);
-       return 0;
+       exit(1);
   }
   else
   {
