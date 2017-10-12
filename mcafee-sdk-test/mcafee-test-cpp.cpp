@@ -6,45 +6,39 @@
 // Description : Hello World in C++, Ansi-style
 //============================================================================
 
-#include <iostream>
-using namespace std;
-
-//int main() {
-//	cout << "!!!Hello World!!!" << endl; // prints !!!Hello World!!!
-//	return 0;
-//}
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <syslog.h>
 #include <string.h>
 #include <unistd.h>
 #include <pthread.h>
+#include <sys/stat.h>
+// STL C++11
 #include <fstream>
 #include <vector>
 #include <map>
 #include <string>
+#include <sstream>
 #include <climits>
 #include <ctime>
 #include <thread>
+#include <chrono>
+#include <atomic>
 // #include <random>
+#include <iostream>
 
+// SDK header
 #include "ts.h"
+
+using namespace std;
+
+
+
 
 #define CONNECT_FAILED 1
 #define REQUEST_FAILED 2
 #define RESPONSE_FAILED 3
 #define DOWNLOAD_SUCCEEDED 4
-
-
-// log file pointer
-FILE *log_FP = NULL;
-
-void my_log_function(TS_Log_Level level, TS_Log_Area areas, const char *message);
-int rate_url(TS_Handle ts_handle, char *url, int vobersity);
-void load_test_data(char *in_file, vector<string> &test_vec, int &num_entries);
-void* thread_func (void* parameters);
-
 
 typedef struct My_Download_Func_Info_t {
 	int my_status;
@@ -62,12 +56,29 @@ typedef struct thread_return_t {
 	long num_categorized;
 } Thread_Return;
 
+
+// log file pointer
+FILE *log_FP = NULL;
+
+void my_log_function(TS_Log_Level level, TS_Log_Area areas, const char *message);
+int rate_url(TS_Handle ts_handle, char *url, int vobersity);
+void load_test_data(char *in_file, vector<string> &test_vec, int &num_entries);
+void* thread_func (void* parameters);
+
 void join_threads(map<pthread_t, Thread_Return> &threads);
 void create_joined_results(map<pthread_t, Thread_Return> &threads, int duration, int num_workers, int lookup_mode);
+void db_sync_func(int interval,TS_Handle ts_handle, char *dnam);
+int db_download_full(TS_Handle ts_handle, char *dname);
+
+string getDownloadStatusStr(int status);
+long getFileSize(string filename);
+
 
 
 // global test data shared with multiple threads
 vector<string> test_vector;
+
+atomic<bool> stop_db_sync_thread(false);
 
 int main(int argc, char *argv[])
 {
@@ -81,11 +92,12 @@ int main(int argc, char *argv[])
 	// handle command line arguments
 
 	extern char *optarg;
-	extern int optind;
-	int c, err = 0;
+	// extern int optind;
+	int c = 0;
 
 	// default flags and values for all options
-	int vflag = 0, log_flag = 0, dflag = 0, lflag = 0, mflag = 0, wflag = 0, iflag = 0;
+	int dflag = 0; // force to download a new db
+	bool db_sync = false;
 	int vobersity = 0;  // 0: low vobersity 1: high vobersity for console output
 	TS_Log_Level sdk_log_level = TS_LOG_LEVEL_INFO; // log level for sdk
 	char *dname = "./data.db";   // local db will be downloaded
@@ -95,21 +107,20 @@ int main(int argc, char *argv[])
 	int lookup_mode = 1; // 1: local_only" 2: hybrid 3: network_only
 	int num_workers = 1;          // number of worker threads to lookup concurrently
 	char *iname = "./test.data";
-	int duration = 100; // run test for duration seconds
+	int duration = 5; // run test for duration seconds
+	int sync_interval = 10; // seconds to sync with web database
 
 	static char usage[] =
-			"usage: %s [-v verbosity] [-V sdk-log-level 1 no, 5 info] [-d db_name] [-l db_name] [-L db_load_mode] [-m lookup_mode(1,2,3)] [-w num_of_workers] [-i test_data] [-t seconds] [-h?]\n";
+			"usage: %s [s] [-f seconds][-v verbosity] [-V sdk-log-level 1 no, 5 info, 17 all] [-d db_name] [-l db_name] [-L db_load_mode] [-m lookup_mode(1,2,3)] [-w num_of_workers] [-i test_data] [-t seconds] [-h?]\n";
 
 	// collect all options
-	while ((c = getopt(argc, argv, "v:V:d:l:L:m:w:i:t:h?")) != -1)
+	while ((c = getopt(argc, argv, "v:V:d:l:L:m:w:i:t:f:sh?")) != -1)
 	{
 		switch (c) {
 		case 'v':
-			vflag = 1;
 			vobersity = atoi(optarg);
 			break;
 		case 'V':
-			log_flag = 1;
 			sdk_log_level = (TS_Log_Level)atoi(optarg);
 			break;
 		case 'd':
@@ -117,14 +128,12 @@ int main(int argc, char *argv[])
 			dname = optarg;
 			break;
 		case 'l':
-			lflag = 1;
 			lname = optarg;
 			break;
 		case 'L':
 			db_load_mode = atoi(optarg);
 			break;
 		case 'm':
-			mflag = 1;
 			lookup_mode = atoi(optarg);
 			break;
 		case 'w':
@@ -135,6 +144,12 @@ int main(int argc, char *argv[])
 			break;
 		case 't':
 			duration = atoi(optarg);
+			break;
+		case 'f':
+			sync_interval = atoi(optarg);
+			break;
+		case 's':
+			db_sync = true;
 			break;
 		case 'h':
 		case '?':
@@ -147,13 +162,16 @@ int main(int argc, char *argv[])
 	printf("verbosity = %d\n", vobersity);
 	printf("sdk_log_level = %d\n", sdk_log_level);
 	printf("dflag = %d\n", dflag);
+	cout << "db_sync = " << db_sync << endl;
+	printf("db sycn interval = %d\n", sync_interval);
 	printf("download_db_name = %s\n", dname);
 	printf("load_db_name = %s\n", lname);
 	printf("db_load_mode = %d\n", db_load_mode);
 	printf("lookup mode = %d\n", lookup_mode);
 	printf("number of worker threads = %d\n", num_workers);
 	printf("test data = \"%s\"\n", iname);
-	printf("duration = %d\n", duration);
+	printf("test duration = %d\n", duration);
+
 
 
 	int num_test_entris = 0;
@@ -164,7 +182,6 @@ int main(int argc, char *argv[])
 	// thread ip and return result table
 	map<pthread_t, Thread_Return> workers;
 
-	//exit(0);
 
     // init the SDK environment
 	TS_Handle ts_handle;
@@ -176,8 +193,6 @@ int main(int argc, char *argv[])
 		log_FP = stdout;
 	}
 
-
-	int download_status;
 
 	if (TS_OK != TS_Init()) {
 		printf("TS_Init Failed. Abort.\n");
@@ -198,10 +213,12 @@ int main(int argc, char *argv[])
 	/*
 	 * Set the log level to info and log all areas.
 	 */
+
+	TS_Log_Area log_area = TS_LOG_AREA_DATABASE_DOWNLOAD | TS_LOG_AREA_DATABASE_LOAD;
 	if (TS_OK != TS_LogLevelSet(
 			ts_handle,
 			sdk_log_level,
-			TS_LOG_AREA_ALL))
+			log_area))
 	{
 		printf("TS_LogFunctionSet failed. Abort.\n");
 		TS_HandleDestroy(&ts_handle);
@@ -280,49 +297,72 @@ int main(int argc, char *argv[])
 	// check if need to download the db
 	if (dflag)
 	{
-		cout << "download the category data base to file -> " << dname << endl;
-	    // set up the download info
-		TS_Database_Download_Func_Info download_info;
-		memset(&download_info, 0, sizeof(download_info));
-
-	    // download_info.serial_number = "SF6S-HH37-G34G-X75H";
-	    // strncpy(download_info.serial_number, "SF6S-HH37-G34G-X75H", 79);
-		download_info.database_type = TS_DATABASE_DOWNLOAD_DATABASE_TYPE_XL;
-		download_info.ts_handle = ts_handle;
-
-
-        // Download the complete Web Database, placing
-		// the new Web Database file to dname
-
-		if (TS_OK != TS_DatabaseDownload( ts_handle,
-										  dname,
-										  TS_DATABASE_DOWNLOAD_MODE_FULL,
-										  &download_status,
-										  &download_info))
-		{
-			printf("TS_DatabaseDownload failed. Abort.\n");
+		int download_status;
+		download_status = db_download_full(ts_handle, lname);
+		if (download_status != TS_DATABASE_DOWNLOAD_COMPLETE) {
+			cerr << "db download error, exit" << endl;
 			TS_HandleDestroy(&ts_handle);
 			return 0;
+
 		}
 
 	}
 
 
-	// Load the local Web Database.
+	// Load the local Web Database, if load fails, download a new one
+
 	cout << "Load DB file <- " << lname << " with TS_DatabaseLoad()" << endl;
 	TS_Database_Access db_access_mode = TS_Database_Access(db_load_mode);
+
+	// first try to load a local db.
 	if (TS_OK != TS_DatabaseLoad( ts_handle,
 								  lname,
 								  db_access_mode,
 								  TS_CAT_SET_LATEST))
 	{
-		printf("TS_DatabaseDownload failed. Abort.\n");
-		TS_HandleDestroy(&ts_handle);
-		return 0;
+		cerr << "TS_DatabaseLoad: " << lname << " failed or file does not exist" << endl;
+		cout << "Download a full db to local: " << lname << endl;
+		int download_status;
+		download_status = db_download_full(ts_handle, lname);
+		if (download_status != TS_DATABASE_DOWNLOAD_COMPLETE) {
+			cerr << "db download error, exit" << endl;
+			TS_HandleDestroy(&ts_handle);
+			return 0;
+
+		} else {
+			// load the new db file
+			if (TS_OK != TS_DatabaseLoad( ts_handle,
+												  lname,
+												  db_access_mode,
+												  TS_CAT_SET_LATEST))
+			{
+				cerr << "Load DB: " << lname << " failed or file does not exist" << endl;
+				cerr << "TS_DatabaseLoad: " << lname << " failed. Abort"<< endl;
+				TS_HandleDestroy(&ts_handle);
+				return 0;
+			}
+		}
+
 	}
 	else {
 		cout << "Local DB is loaded successfully" << endl;
 	}
+
+	// start a thread to sync up with remote Web Database
+	thread db_sync_thread;
+	if (db_sync)
+	{
+		cout << "starting db_sync thread." << endl;
+		try {
+			db_sync_thread = thread(db_sync_func, sync_interval, ts_handle, lname);
+			//db_sync_thread.detach();
+		} catch (const exception& e) {
+			cerr << "EXCEPTION: " << e.what() << endl;
+		}
+
+
+	}
+
 
 	cout << "create # " << num_workers << " of worker threads with test duration: " << duration << " seconds." <<endl;
 
@@ -344,12 +384,10 @@ int main(int argc, char *argv[])
 	join_threads(workers);
 	create_joined_results(workers, duration, num_workers, lookup_mode);
 
+	// stop the db_sync_thread
+	stop_db_sync_thread.store(true);
+	db_sync_thread.join();
 
-//	printf("rate a url with rate_url\n");
-//	char *url = "google.com";
-//	url = "https://www.google.com/intl/en/ads/?fg=1";
-//	printf("url: %s\n", url);
-//	rate_url(ts_handle, url);
 
 	TS_HandleDestroy(&ts_handle);
 	cout << "End of Test!" << endl;
@@ -648,7 +686,185 @@ void create_joined_results(map<pthread_t, Thread_Return> &threads, int duration,
 
 
 
+// repeatedly download database incrementally in every interval seconds
+void db_sync_func(int interval, TS_Handle ts_handle, char *dname)
+{
+	try {
+		cout << "Enter db_sync_func()" << endl;
+		while (!stop_db_sync_thread.load()) {
+			//
+			cout << "Do DB incremental download" << endl;
+			cout << "Original loaded DB: " << dname << endl;
+			cout << "Before Incremental Download" << endl;
+			cout << "size of " << dname << ": " << getFileSize(string(dname)) << endl;
+
+			// Download and merge the incremental Web Database, placing the new
+			// Web Databse file in "./data.db.download".
+
+			// create a file name for new db
+			time_t current_time;
+			time(&current_time);
+
+			stringstream strStream;
+			strStream << "./data.db.download."<<current_time;
+			string newDatabaseNameStr = strStream.str();
+			cout << "New Web Database file name: " << newDatabaseNameStr << endl;
+
+			// set up the download info
+			TS_Database_Download_Func_Info download_info;
+			memset(&download_info, 0, sizeof(download_info));
+			int download_status;
+
+			// download_info.serial_number = "SF6S-HH37-G34G-X75H";
+			// strncpy(download_info.serial_number, "SF6S-HH37-G34G-X75H", 79);
+			download_info.database_type = TS_DATABASE_DOWNLOAD_DATABASE_TYPE_XL;
+			download_info.ts_handle = ts_handle;
 
 
+			if (TS_OK != TS_DatabaseDownload(
+					ts_handle,
+					newDatabaseNameStr.c_str(),
+					TS_DATABASE_DOWNLOAD_MODE_INCR,
+					&download_status,
+					&download_info))
+			{
+				cerr << "Incremental TS_DatabaseDownload failed.\n";
+				cerr << "TS_DatabaseDownload download_status: "
+								<< " " << getDownloadStatusStr(download_status) << endl;
+
+				// TODO: what should do here to recover or exit ?
+			} else {
+				cout << "Incremental download: " << newDatabaseNameStr << " is successful." << endl;
+
+				cout << "TS_DatabaseDownload download_status: "
+						<< " " << getDownloadStatusStr(download_status) << endl;
+
+				if (download_status == TS_DATABASE_DOWNLOAD_COMPLETE)
+				{
+					cout << "After Incremental download complete" << endl;
+					auto oldFileSize = getFileSize(string(dname));
+					auto newFileSize = getFileSize(newDatabaseNameStr);
+					cout << "size of "<< dname << ": " << oldFileSize << endl;
+					cout << "size of "<< newDatabaseNameStr << ": " << newFileSize << endl;
+					cout << "Are same sizes ? : "<< ((newFileSize-oldFileSize == 0) ? "YES":"NO" ) << endl;
+
+					// NOTES: refer to API example on page 182, two files are reloaded
+
+					string reloadDB;
+
+					// Reload the new Web Database
+					reloadDB = dname;
+
+					cout << "Reload the new db: " << reloadDB << endl;
+					if (TS_OK != TS_DatabaseReload(ts_handle, reloadDB.c_str()))
+					{
+						cerr << "TS_DatabaseReload(): " << reloadDB << " failed" << endl;
+					} else {
+						cout << "TS_DatabaseReload("<<reloadDB << ") is successful." << endl;
+					}
+
+					// Reload the new Web Database
+					reloadDB = newDatabaseNameStr;
+
+					cout << "Reload the new db: " << reloadDB << endl;
+					if (TS_OK != TS_DatabaseReload(ts_handle, reloadDB.c_str()))
+					{
+						cerr << "TS_DatabaseReload(): " << reloadDB << " failed" << endl;
+					} else {
+						cout << "TS_DatabaseReload("<<reloadDB << ") is successful." << endl;
+					}
+
+
+				}
+				else {
+					cout << "Skip Reload." << endl;
+				}
+
+		    }
+			cout << "sleep for " << interval << " seconds!" << endl;
+			this_thread::sleep_for(chrono::seconds(interval));
+		}
+	}
+	// make sure no exception leaves the thread and terminates the program
+	catch (const exception& e) {
+		cerr << "THREAD-EXCEPTION (thread " << this_thread::get_id() << "): "
+				<< e.what() << endl;
+	} catch (...) {
+		cerr << "THREAD-EXCEPTION (thread " << this_thread::get_id() << ")" << endl;
+	}
+
+    cout << "Exit the db_sync_func()" << endl;
+    cout.flush();
+	return;
+}
+
+
+
+int db_download_full(TS_Handle ts_handle, char *dname)
+{
+
+	cout << "Download the full category database to file -> " << dname << endl;
+
+	// set up the download info
+	TS_Database_Download_Func_Info download_info;
+	memset(&download_info, 0, sizeof(download_info));
+
+	int download_status;
+
+	// download_info.serial_number = "SF6S-HH37-G34G-X75H";
+	// strncpy(download_info.serial_number, "SF6S-HH37-G34G-X75H", 79);
+	download_info.database_type = TS_DATABASE_DOWNLOAD_DATABASE_TYPE_XL;
+	download_info.ts_handle = ts_handle;
+
+
+	// Download the complete Web Database, placing
+	// the new Web Database file to dname
+
+	if (TS_OK != TS_DatabaseDownload( ts_handle,
+									  dname,
+									  TS_DATABASE_DOWNLOAD_MODE_FULL,
+									  &download_status,
+									  &download_info))
+	{
+		cerr<<"TS_DatabaseDownload failed.\n";
+		cout << "download_status: " << " " << getDownloadStatusStr(download_status) << endl;
+		return -1;
+	}
+	cout << "DB download TS_OK is True" << endl;
+	cout << "download_status: " << " " << getDownloadStatusStr(download_status) << endl;
+	return download_status;
+
+}
+
+string getDownloadStatusStr(int status)
+{
+	string ret = "UNKNOWN STATUS";
+    /*
+		TS_DATABASE_DOWNLOAD_COMPLETE   1
+		TS_DATABASE_DOWNLOAD_PARTIAL    2
+		TS_DATABASE_DOWNLOAD_NOT_NEEDED 3
+    */
+	switch (status) {
+	case 1:
+		ret = "TS_DATABASE_DOWNLOAD_COMPLETE";
+		break;
+	case 2:
+		ret = "TS_DATABASE_DOWNLOAD_PARTIAL";
+		break;
+	case 3:
+		ret = "TS_DATABASE_DOWNLOAD_NOT_NEEDED";
+		break;
+	}
+	return ret;
+
+}
+
+
+long getFileSize(string filename)
+{
+    struct stat stat_buf;
+    int rc = stat(filename.c_str(), &stat_buf);
+    return rc == 0 ? stat_buf.st_size : -1;
+}
 
 
