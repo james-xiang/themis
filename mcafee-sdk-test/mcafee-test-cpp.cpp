@@ -698,6 +698,20 @@ void db_sync_func(int interval, TS_Handle ts_handle, char *dname)
 			cout << "Before Incremental Download" << endl;
 			cout << "size of " << dname << ": " << getFileSize(string(dname)) << endl;
 
+			int ver_info = 0;
+			// TS_Handle_Info info_type;
+			// unsigned int ver_info_size;
+
+			/* get the DB version */
+			if (TS_OK
+					!= TS_HandleInfoGet(ts_handle,
+							TS_HANDLE_INFO_DATABASE_SERIAL_NUM, &ver_info,
+							sizeof(ver_info))) {
+				cout << "TS_HandleInfoGet failed" << endl;
+			} else {
+				cout << "Current Loaded DB version = " << ver_info << endl;
+			}
+
 			// Download and merge the incremental Web Database, placing the new
 			// Web Databse file in "./data.db.download".
 
@@ -748,10 +762,21 @@ void db_sync_func(int interval, TS_Handle ts_handle, char *dname)
 					cout << "size of "<< newDatabaseNameStr << ": " << newFileSize << endl;
 					cout << "Are same sizes ? : "<< ((newFileSize-oldFileSize == 0) ? "YES":"NO" ) << endl;
 
+					/* get the DB version */
+					if (TS_OK
+							!= TS_HandleInfoGet(ts_handle,
+									TS_HANDLE_INFO_DATABASE_SERIAL_NUM,
+									&ver_info, sizeof(ver_info))) {
+						cout << "TS_HandleInfoGet failed" << endl;
+					} else {
+						cout << "Current Loaded DB version = " << ver_info
+								<< endl;
+					}
+
 					// NOTES: refer to API example on page 182, two files are reloaded
 
 					string reloadDB;
-
+#if 1
 					// Reload the new Web Database
 					reloadDB = dname;
 
@@ -763,6 +788,17 @@ void db_sync_func(int interval, TS_Handle ts_handle, char *dname)
 						cout << "TS_DatabaseReload("<<reloadDB << ") is successful." << endl;
 					}
 
+					/* get the DB version */
+					if (TS_OK
+							!= TS_HandleInfoGet(ts_handle,
+									TS_HANDLE_INFO_DATABASE_SERIAL_NUM,
+									&ver_info, sizeof(ver_info))) {
+						cout << "TS_HandleInfoGet failed" << endl;
+					} else {
+						cout << "Current Loaded DB version = " << ver_info
+								<< endl;
+					}
+#endif
 					// Reload the new Web Database
 					reloadDB = newDatabaseNameStr;
 
@@ -772,6 +808,17 @@ void db_sync_func(int interval, TS_Handle ts_handle, char *dname)
 						cerr << "TS_DatabaseReload(): " << reloadDB << " failed" << endl;
 					} else {
 						cout << "TS_DatabaseReload("<<reloadDB << ") is successful." << endl;
+					}
+
+					/* get the DB version */
+					if (TS_OK
+							!= TS_HandleInfoGet(ts_handle,
+									TS_HANDLE_INFO_DATABASE_SERIAL_NUM,
+									&ver_info, sizeof(ver_info))) {
+						cout << "TS_HandleInfoGet failed" << endl;
+					} else {
+						cout << "Current Loaded DB version = " << ver_info
+								<< endl;
 					}
 
 
